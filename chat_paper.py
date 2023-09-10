@@ -16,6 +16,8 @@ import tiktoken
 
 import fitz, io, os
 from PIL import Image
+from pdf_parser import PDFFigure2PaperParser, PDFPaperParser
+from pdf_extract import *
 
 
 class Paper:
@@ -37,7 +39,61 @@ class Paper:
         self.roman_num = ["I", "II", 'III', "IV", "V", "VI", "VII", "VIII", "IIX", "IX", "X"]
         self.digit_num = [str(d+1) for d in range(10)]
         self.first_image = ''
+        self.pdf_parser = PDFFigure2PaperParser(self.path)
         
+    def gen_image(self, verbose=True, save_path=None):
+        """
+        Generate image for each section in xmind (Figure/Table)
+        return img relative paths : list
+        """
+        section_names = self.pdf_parser.get_section_titles()
+        img_dict, img_figures_all, img_tables_all = self.pdf_parser.get_section_imagedict(verbose=verbose)
+        # for name in section_names[:-1]:
+        #     img_ls = img_dict.get(name)
+        #     print("img_ls:", name, img_ls)
+        #     if img_ls:
+        #         for img in img_ls:
+        #             img_tempdir = get_objpixmap(self.pdf_parser.pdf, img, get_tmpfile_dir=True)
+        #             # topic = topic_search(self, name).addSubTopicbyImage(
+        #             #         img_tempdir, img_ls.index(img))
+        #             # # FIXME: This is a temporary solution for compatibility
+        #             # if len(img) == 4:
+        #             #     topic.setTitle(img[3])
+        #             #     topic.setTitleSvgWidth()
+        img_paths = []
+        pdf_name = os.path.basename(self.path)
+        if pdf_name.endswith('.pdf'): pdf_name = str(pdf_name[:-4]).replace(" ", "")
+        save_root_path = os.path.join(save_path, pdf_name)
+        img_figures_all = sorted(img_figures_all, key=lambda x:int(x[4])) # sort by id
+        img_tables_all = sorted(img_tables_all, key=lambda x:int(x[4])) # sort by id
+        for img in img_figures_all:
+            img_tempdir, img_name = save_objpixmap(self.pdf_parser.pdf, img, savepath=save_root_path)
+            img_paths.append(os.path.join(pdf_name, img_name))
+
+        for img in img_tables_all:
+            img_tempdir, img_name = save_objpixmap(self.pdf_parser.pdf, img, savepath=save_root_path)
+            img_paths.append(os.path.join(pdf_name, img_name))
+        return img_paths
+
+    def gen_equation(self, legacy=True, save_path=None):
+        """
+        Generate equation for each section in xmind
+
+        :param legacy: if True, use legacy method to extract\
+            equation, else use new method.
+        `NOTE` It seems that legacy method is more accurate.
+        """
+        section_names = self.pdf_parser.get_section_titles()
+        eqa_dict = self.pdf_parser.get_section_equationdict(legacy=legacy)
+        for name in section_names[:-1]:
+            eqa_ls = eqa_dict.get(name)
+            if eqa_ls: print(name, eqa_ls)
+            if eqa_ls:
+                for eqa in eqa_ls:
+                    eqa_tempdir = get_objpixmap(self.pdf_parser.pdf, eqa, savepath=save_path)
+                    # topic_search(self, name).addSubTopicbyImage(
+                    #     eqa_tempdir, eqa_ls.index(eqa))
+
     def parse_pdf(self):
         self.pdf = fitz.open(self.path) # pdf文档
         self.text_list = [page.get_text() for page in self.pdf]
@@ -449,9 +505,12 @@ class Reader:
 
         return image_url
 
-    def summary_with_chat(self, paper_list):
+    def summary_with_chat(self, paper_list, save_root_path=None):
         htmls = []
         for paper_index, paper in enumerate(paper_list):
+            # extract figures tables eqautions of pdf
+            img_paths = paper.gen_image(save_path=save_root_path)
+            # paper.gen_equation(save_path=os.path.join(self.root_path, 'export'))
             # 第一步先用title，abs，和introduction进行总结。
             text = ''
             text += 'Title:' + paper.title
@@ -551,14 +610,17 @@ class Reader:
                                                                 conclusion_prompt_token=conclusion_prompt_token)
             htmls.append(chat_conclusion_text)
             htmls.append("\n" * 4)
-
+            # 添加图片链接
+            for img_path in img_paths:
+                htmls.append('![]({})'.format(str(img_path)))
+                htmls.append("\n" * 1)
             # # 整合成一个文件，打包保存下来。
             date_str = str(datetime.datetime.now())[:13].replace(' ', '-')
-            export_path = os.path.join(self.root_path, 'export')
-            if not os.path.exists(export_path):
-                os.makedirs(export_path)
+            # export_path = os.path.join(self.root_path, 'export')
+            if not os.path.exists(save_root_path):
+                os.makedirs(save_root_path)
             mode = 'w' if paper_index == 0 else 'a'
-            file_name = os.path.join(export_path,
+            file_name = os.path.join(save_root_path,
                                      date_str + '-' + self.validateTitle(paper.title[:80]) + "." + self.file_format)
             self.export_to_markdown("\n".join(htmls), file_name=file_name, mode=mode)
 
@@ -696,26 +758,37 @@ class Reader:
                  3. mark the first author's affiliation (output {} translation only)                 
                  4. mark the keywords of this article (use English)
                  5. link to the paper, Github code link (if available, fill in Github:None if not)
-                 6. summarize according to the following four points.Be sure to use {} answers (proper nouns need to be marked in English)
+                 6. translate the abstract
+                 7. summarize according to the following four points.Be sure to use {} answers (proper nouns need to be marked in English)
                     - (1):What is the research background of this article?
                     - (2):What are the past methods? What are the problems with them? Is the approach well motivated?
                     - (3):What is the research methodology proposed in this paper?
                     - (4):On what task and what performance is achieved by the methods in this paper? Can the performance support their goals?
-                 Follow the format of the output that follows:                  
+                 8. translate the contributions , no less than 500 words. Be sure to use {} answers (proper nouns need to be marked in English)
+    
+             Follow the format of the output that follows:                  
                  1. Title: xxx\n\n
                  2. Authors: xxx\n\n
                  3. Affiliation: xxx\n\n                 
                  4. Keywords: xxx\n\n   
                  5. Urls: xxx or xxx , xxx \n\n      
-                 6. Summary: \n\n
+                 6. Abstract:\n\n
+                 7. Summary: \n\n
                     - (1):xxx;\n 
                     - (2):xxx;\n 
                     - (3):xxx;\n  
-                    - (4):xxx.\n\n     
+                    - (4):xxx.\n\n  
+                 8. Contributions: \n\n
+                    - (1):xxx;\n 
+                    - (2):xxx;\n 
+                    - (3):xxx;\n  
+                    - (4):xxx.\n\n   
+                 
                  
                  Be sure to use {} answers (proper nouns need to be marked in English), statements as concise and academic as possible, do not have too much repetitive information, numerical values using the original numbers, be sure to strictly follow the format, the corresponding content output to xxx, in accordance with \n line feed.                 
-                 """.format(self.language, self.language, self.language)},
+                 """.format(self.language, self.language, self.language, "Chinese")},
         ]
+
 
         if openai.api_type == 'azure':
             response = openai.ChatCompletion.create(
@@ -785,7 +858,7 @@ def chat_paper_main(args):
                         paper_list.append(Paper(path=os.path.join(root, filename)))
         print("------------------paper_num: {}------------------".format(len(paper_list)))
         [print(paper_index, paper_name.path.split('\\')[-1]) for paper_index, paper_name in enumerate(paper_list)]
-        reader1.summary_with_chat(paper_list=paper_list)
+        reader1.summary_with_chat(paper_list=paper_list, save_root_path=args.save_root_path)
     else:
         reader1 = Reader(key_word=args.key_word,
                          query=args.query,
@@ -796,14 +869,14 @@ def chat_paper_main(args):
         reader1.show_info()
         filter_results = reader1.filter_arxiv(max_results=args.max_results)
         paper_list = reader1.download_pdf(filter_results)
-        reader1.summary_with_chat(paper_list=paper_list)
+        reader1.summary_with_chat(paper_list=paper_list, save_root_path=args.save_root_path)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pdf_path", type=str, default=r'demo.pdf', help="if none, the bot will download from arxiv with query")
+    # parser.add_argument("--pdf_path", type=str, default=r'demo.pdf', help="if none, the bot will download from arxiv with query")
     # parser.add_argument("--pdf_path", type=str, default=r'C:\Users\Administrator\Desktop\DHER\RHER_Reset\ChatPaper', help="if none, the bot will download from arxiv with query")
-    # parser.add_argument("--pdf_path", type=str, default='', help="if none, the bot will download from arxiv with query")
+    parser.add_argument("--pdf_path", type=str, default='', help="if none, the bot will download from arxiv with query")
     parser.add_argument("--query", type=str, default='all: ChatGPT robot',
                         help="the query string, ti: xx, au: xx, all: xx,")
     parser.add_argument("--key_word", type=str, default='reinforcement learning',
@@ -817,6 +890,7 @@ if __name__ == '__main__':
                         help="save image? It takes a minute or two to save a picture! But pretty")
     parser.add_argument("--file_format", type=str, default='md', help="导出的文件格式，如果存图片的话，最好是md，如果不是的话，txt的不会乱")
     parser.add_argument("--language", type=str, default='zh', help="The other output lauguage is English, is en")    
+    parser.add_argument("--save_root_path", type=str, default='./export', help="root save path for md and imgs")    
     import time
 
     start_time = time.time()
